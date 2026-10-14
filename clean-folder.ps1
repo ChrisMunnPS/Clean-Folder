@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2.3.0
+.VERSION 2.3.1
 
 .GUID 6bfc8b39-87a0-442a-975f-81008dd683ca
 
@@ -9,7 +9,7 @@
 .TAGS cleanup downloads wpf gui recycle-bin
 
 .RELEASENOTES
-See CHANGELOG.md. 2.3.0: adds msg, one and vsdx file types.
+See CHANGELOG.md. 2.3.1: temp clean-up now removes subfolders reliably (read-only folders and junctions).
 
 #>
 
@@ -59,8 +59,9 @@ See CHANGELOG.md. 2.3.0: adds msg, one and vsdx file types.
     Prints the script version and exits.
 
 .PARAMETER CleanUserTemp
-    Permanently deletes everything in the current user's temp folder that is not in use, then removes
-    empty subfolders. Files in use are skipped.
+    Permanently deletes everything in the current user's temp folder that is not in use, including the
+    contents of all subfolders, then removes the subfolders themselves. Files in use are skipped and
+    keep their folders.
 
 .PARAMETER CleanWindowsTemp
     Same as -CleanUserTemp for C:\Windows\Temp. Requires an elevated (Run as administrator) session.
@@ -120,7 +121,7 @@ param(
 )
 
 # Semantic Versioning 2.0.0. Keep in sync with .VERSION above and CHANGELOG.md on every change.
-$ScriptVersion = '2.3.0'
+$ScriptVersion = '2.3.1'
 
 # ------------------------------------------------------------------------------------------------
 # Catalog of file types (Icon values are Unicode code points, keeping this file pure ASCII)
@@ -227,6 +228,7 @@ function Invoke-CleanupDeletion {
         DeletedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         ByExtension  = @{}
         PrunedDirectories = 0
+        KeptDirectories = 0
     }
 
     if ($Sync) { $Sync.Total = $Files.Count }
@@ -258,7 +260,9 @@ function Invoke-CleanupDeletion {
 
     # Optionally remove subfolders left empty (used for temp clean-up)
     if ($PruneRoot -and -not $result.Cancelled) {
-        $result.PrunedDirectories = [int](Remove-EmptyDirectory -Root $PruneRoot)
+        $pruned = Remove-EmptyDirectory -Root $PruneRoot
+        $result.PrunedDirectories = [int]$pruned.Removed
+        $result.KeptDirectories = [int]$pruned.Kept
     }
 
     $result
@@ -269,14 +273,19 @@ function Remove-EmptyDirectory {
     param([Parameter(Mandatory)][string]$Root)
 
     $dirs = [System.Collections.Generic.List[string]]::new()
+    $links = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $stack = [System.Collections.Generic.Stack[string]]::new()
     $stack.Push($Root)
     while ($stack.Count -gt 0) {
         $current = $stack.Pop()
         try {
             foreach ($sub in [System.IO.DirectoryInfo]::new($current).EnumerateDirectories()) {
-                if (-not ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-                    $dirs.Add($sub.FullName)
+                $dirs.Add($sub.FullName)
+                if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    # Junction or symlink: remove the link itself, never follow it or touch its target
+                    [void]$links.Add($sub.FullName)
+                }
+                else {
                     $stack.Push($sub.FullName)
                 }
             }
@@ -288,14 +297,20 @@ function Remove-EmptyDirectory {
     # Longest paths first, so children are removed before their parents
     foreach ($dir in ($dirs | Sort-Object -Property Length -Descending)) {
         try {
-            if (@([System.IO.Directory]::GetFileSystemEntries($dir)).Count -eq 0) {
-                [System.IO.Directory]::Delete($dir)
-                $removed++
+            if (-not $links.Contains($dir) -and @([System.IO.Directory]::GetFileSystemEntries($dir)).Count -gt 0) { continue }
+
+            # A read-only folder cannot be deleted until the attribute is cleared
+            $attributes = [System.IO.File]::GetAttributes($dir)
+            if ($attributes -band [System.IO.FileAttributes]::ReadOnly) {
+                [System.IO.File]::SetAttributes($dir, ($attributes -bxor [System.IO.FileAttributes]::ReadOnly))
             }
+            [System.IO.Directory]::Delete($dir)
+            $removed++
         }
         catch { Write-Verbose "Could not remove '$dir': $($_.Exception.Message)" }
     }
-    $removed
+
+    [pscustomobject]@{ Removed = $removed; Kept = ($dirs.Count - $removed) }
 }
 
 function Get-RecycleBinItem {
@@ -607,8 +622,8 @@ function Invoke-CliTempCleanup {
 
     $result = Invoke-CleanupDeletion -Files $files -Permanent $true -PruneRoot $target.Path -Sync $null
     foreach ($failure in $result.Failed) { Write-Verbose "Skipped: $failure" }
-    $summary = '{0} files deleted ({1}), {2} skipped (in use or no access), {3} empty folders removed.' -f `
-        $result.Deleted, (Format-Size $result.Bytes), $result.Failed.Count, $result.PrunedDirectories
+    $summary = '{0} files deleted ({1}), {2} skipped (in use or no access), {3} folders removed, {4} folders could not be removed (in use or not empty).' -f `
+        $result.Deleted, (Format-Size $result.Bytes), $result.Failed.Count, $result.PrunedDirectories, $result.KeptDirectories
     Write-Host ('{0}: {1}' -f $target.Label, $summary)
     Write-TaskLog -Text ('{0} cleaned (command line): {1}' -f $target.Label, $summary)
 }
@@ -1492,7 +1507,8 @@ function Complete-Worker {
             }
             else {
                 $text = 'Deleted {0} files ({1}) from {2}.' -f $res.Deleted, (Format-Size $res.Bytes), $label
-                if ($res.PrunedDirectories -gt 0) { $text += " Removed $($res.PrunedDirectories) empty folders." }
+                if ($res.PrunedDirectories -gt 0) { $text += " Removed $($res.PrunedDirectories) folders." }
+                if ($res.KeptDirectories -gt 0) { $text += " $($res.KeptDirectories) folders could not be removed (in use or not empty)." }
             }
             if ($res.Cancelled) { $text += ' Cancelled before finishing.' }
             if ($res.Failed.Count -gt 0) {
@@ -1876,7 +1892,7 @@ $DeleteButton.Add_Click({
             else {
                 $permanent = $true
                 $prune = $state.ScanFolder
-                $consequence = 'They will be PERMANENTLY deleted (not sent to the Recycle Bin). Files in use are skipped and empty subfolders are removed.'
+                $consequence = 'They will be PERMANENTLY deleted (not sent to the Recycle Bin), and the subfolders are removed with them. Files in use are skipped, so their folders stay.'
             }
             $message = "{0} files ({1}) from:`n{2}`n`n{3}`n`nContinue?" -f $state.Items.Count, (Format-Size $total), $state.ScanFolder, $consequence
 
