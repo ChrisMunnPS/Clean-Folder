@@ -120,7 +120,7 @@ A dedicated row of buttons handles common Windows housekeeping. Each button **lo
 
 | Button | What it does | Notes |
 |---|---|---|
-| 🗑️ **Clean user temp** | Deletes everything in your temp folder that is not in use | Permanent. Locked files are skipped, empty subfolders are removed |
+| 🗑️ **Clean user temp** | Deletes everything in your temp folder that is not in use | Permanent. Subfolders are cleared and removed too; locked files are skipped and keep their folders |
 | 🪟 **Clean Windows temp** | Same for `C:\Windows\Temp` | Needs an elevated session. Otherwise greyed out, with a **Restart as administrator** button |
 | ♻️ **Empty Recycle Bin** | Empties the bin for your account across all drives | Shows item count and size first. Cannot be undone or cancelled once started |
 
@@ -197,7 +197,7 @@ Files deleted: 34 | Total size: 450.8 MB | Failures: 0
 
 ```text
 Scanning user temp 'C:\Users\you\AppData\Local\Temp' (everything not in use)
-user temp: 482 files deleted (96.4 MB), 17 skipped (in use or no access), 31 empty folders removed.
+user temp: 482 files deleted (96.4 MB), 17 skipped (in use or no access), 31 folders removed, 4 folders could not be removed (in use or not empty).
 Recycle Bin emptied: 58 items (2.31 GB).
 ```
 
